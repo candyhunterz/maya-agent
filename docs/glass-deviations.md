@@ -16,3 +16,8 @@ Append-only log of every place where Glass adapted away from the plan's literal 
 **Plan said:** When in `allow_extra=False` mode the matcher raises `MatchError(f"expected {tool} at position {start}, got {name} (args={args})")`.
 **Actually used:** Same message but with "got extra unexpected call" in place of "got" so the test's `pytest.raises(MatchError, match="extra")` regex matches.
 **Why:** The plan's `test_allow_extra_false_rejects_extras` expects the error to match the regex `"extra"`, but the plan's literal implementation never emits that word in the strict-mode rejection path. Adjusting the message text (one phrase) is the smallest change that reconciles the plan's own test with the implementation. Semantics are unchanged.
+
+## Task 13.1 — `test_eval_case` skips when recording is absent
+**Plan said:** Each parameterized case calls `build_llm_client(...)` directly. In auto/replay mode, if no recording exists, the runner falls back to a live `OllamaClient` which dies on first request when Ollama isn't running.
+**Actually used:** Added a guard in `test_eval_cases.py::test_eval_case` that calls `pytest.skip(...)` when `mode in ("auto", "replay")` and the recording file is absent.
+**Why:** PRD Definition-of-done #3 requires `pytest tests/eval -q` to "skip cleanly with a message indicating recordings are needed" when recordings are unavailable. With Ollama down on this dev machine and no recordings yet (Task 13.2 is deferred per PRD), the unmodified runner failed six cases instead of skipping. The skip aligns the plan output with the PRD's ship gate.

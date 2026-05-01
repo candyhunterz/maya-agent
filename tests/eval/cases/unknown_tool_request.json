@@ -1,0 +1,11 @@
+{
+  "name": "unknown_tool_request",
+  "description": "User asks for a capability the agent does not have; should finish gracefully.",
+  "intent": "convert this scene to USD format",
+  "clarify_responses": [],
+  "fixture_observations": [],
+  "expected_calls": [],
+  "allow_extra_calls": true,
+  "terminal_action": "finish",
+  "max_steps": 5
+}

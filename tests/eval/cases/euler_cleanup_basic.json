@@ -1,0 +1,40 @@
+{
+  "name": "euler_cleanup_basic",
+  "description": "User requests Euler cleanup on FK arm controls; agent inspects, finds, fixes, finishes.",
+  "intent": "clean up Euler discontinuities on the L_arm FK controls",
+  "clarify_responses": [],
+  "fixture_observations": [
+    {
+      "match_tool": "inspect_scene",
+      "response": {"ok": true, "value": {
+        "selection": ["rig:L_arm_FK_CTL"],
+        "namespaces": ["rig"],
+        "scene_path": "/fixtures/test.ma",
+        "framerate": "film",
+        "frame_range": [1, 100]
+      }}
+    },
+    {
+      "match_tool": "find_euler_discontinuities",
+      "match_args_contain": {"objects": ["rig:L_arm_FK_CTL"]},
+      "response": {"ok": true, "value": {
+        "discontinuities": [
+          {"object": "rig:L_arm_FK_CTL", "attribute": "rotateY", "frame": 24, "jump_degrees": 320}
+        ]
+      }}
+    },
+    {
+      "match_tool": "fix_euler_discontinuities",
+      "match_args_contain": {"objects": ["rig:L_arm_FK_CTL"]},
+      "response": {"ok": true, "value": {"fixed_curves": ["rig:L_arm_FK_CTL_rotateY"], "count": 1}}
+    }
+  ],
+  "expected_calls": [
+    "inspect_scene",
+    {"tool": "find_euler_discontinuities", "args_contain": {"objects": ["rig:L_arm_FK_CTL"]}},
+    "fix_euler_discontinuities"
+  ],
+  "allow_extra_calls": true,
+  "terminal_action": "finish",
+  "max_steps": 10
+}

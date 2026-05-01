@@ -1,0 +1,25 @@
+{
+  "name": "malformed_response_recovery",
+  "description": "Verify the parse-error retry path: schema-conforming but broken first response, valid second response.",
+  "intent": "do something",
+  "clarify_responses": [],
+  "fixture_observations": [],
+  "scripted_llm_responses": [
+    {
+      "thinking": "I'll call a tool",
+      "action": "tool_call",
+      "tool": null,
+      "arguments": null
+    },
+    {
+      "thinking": "I see the parse_error; I'll just finish",
+      "action": "finish",
+      "user_message": "I couldn't proceed because of a malformed earlier step.",
+      "summary": "Aborted on parse_error after first turn."
+    }
+  ],
+  "expected_calls": [],
+  "allow_extra_calls": true,
+  "terminal_action": "finish",
+  "max_steps": 5
+}

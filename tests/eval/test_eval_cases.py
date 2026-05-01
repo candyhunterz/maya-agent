@@ -55,6 +55,15 @@ def test_eval_case(case_path):
         llm = ScriptedLLMClient(case.scripted_llm_responses)
     else:
         mode = get_eval_mode()
+        rec_path = RECORDINGS_DIR / f"{case.name}.jsonl"
+        # PRD Definition-of-done #3 wants `pytest tests/eval -q` to either pass
+        # (recordings present) or skip cleanly. Without a recording and without
+        # Ollama running, the live fallback would error mid-test — skip instead.
+        if mode in ("auto", "replay") and not rec_path.exists():
+            pytest.skip(
+                f"No recording at {rec_path}. Run with MAYA_AGENT_EVAL_MODE=record "
+                f"against live Ollama to generate one."
+            )
         llm = build_llm_client(
             mode=mode, case_name=case.name,
             recordings_dir=RECORDINGS_DIR, real_factory=_real_llm_factory,
