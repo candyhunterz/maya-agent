@@ -35,6 +35,20 @@ This document specifies the framework v1. The framework is studio-agnostic and e
 - Telemetry beyond stdlib `logging`.
 - Multi-Maya-instance coordination (each Maya has its own pipe path including PID).
 
+## Deployment targets
+
+The framework targets two environments:
+
+- **Development** — the author's personal Windows machine. Maya, Ollama, and the sidecar all run on the same Windows host. Used for prompt iteration, eval-harness work, and the v1 personal-machine smoke test.
+- **Production** — Linux VFX studio workstations. Maya runs on Linux; the sidecar runs on the same Linux host. Studio plugins ship via a separate repo loaded through `MAYA_AGENT_PLUGIN_PATHS`. This is where the framework will be used in anger.
+
+Code must work on both. The transport layer hides the OS distinction, but they are *not* equally well-supported in v1:
+
+- **Linux (production target):** `QLocalServer` listens on a unix domain socket at `/tmp/maya-agent-<pid>.sock`. Sidecar connects via `asyncio.open_unix_connection` — natively supported with no workaround. This is the clean path.
+- **Windows (dev only):** `QLocalServer` listens on a named pipe at `\\.\pipe\maya-agent-<pid>` correctly via Qt. However, asyncio does not natively support Windows named pipes for *client* connect, so the sidecar's connect side falls back to TCP loopback in v1 development. This is a dev-only workaround, not a production limitation — the studio target uses the fully-supported unix domain socket path.
+
+The Maya-side code (`QLocalServer`, panel, dispatcher) is identical across platforms — Qt abstracts the underlying transport. Only the sidecar's connect side has the Windows-asyncio gap, and that's irrelevant to the studio deployment.
+
 ## Architectural Decisions
 
 | # | Decision | Rationale |
@@ -164,7 +178,7 @@ studio-maya-agent-plugins/
 └── tests/
 ```
 
-Studio sets `MAYA_AGENT_PLUGIN_PATHS=C:\studio\maya-agent-plugins\src` and the framework loader walks it.
+Studio sets `MAYA_AGENT_PLUGIN_PATHS=/studio/maya-agent-plugins/src` (Linux production) or `C:\studio\maya-agent-plugins\src` (Windows dev) and the framework loader walks it.
 
 ## Core Interfaces
 

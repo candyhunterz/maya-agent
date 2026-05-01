@@ -24,7 +24,10 @@ When the plan and spec disagree, the spec wins. Flag the disagreement in `docs/g
 
 ## Runtime context
 
-- **OS:** Windows 11 (development); Linux/macOS supported by spec but not the dev environment
+- **OS:**
+  - Development environment (this machine): Windows 11
+  - **Studio production target: Linux** (this is where the framework will actually be used)
+  - Code must work on both. The transport layer hides the OS distinction. The Linux path uses `asyncio.open_unix_connection` against a unix domain socket and is the clean, well-supported path. The Windows dev path uses TCP loopback as a workaround — see Known plan gaps below.
 - **Python:** 3.10+
 - **Maya:** 2024+ (only relevant for the manual smoke test in Phase 14)
 - **Ollama:** required only for Phase 13 recording and Task 4.3's optional manual smoke; CI replay mode does not require Ollama
@@ -85,7 +88,7 @@ These tasks reference resources that may not be available; honor the skip rules:
 
 The following are deliberate v1 limitations the plan acknowledges. Glass should NOT try to "fix" them by writing extra code:
 
-- **Windows named-pipe transport** (Task 5.1, Task 7.1): asyncio doesn't natively support Windows named pipes. The plan punts via TCP loopback for Windows dev (sidecar accepts `host:port` via `--pipe`). The Maya-side `QLocalServer` does use named pipes correctly (Qt handles this natively). The sidecar↔Maya wire on Windows for v1 development is therefore TCP loopback, not named pipes. This is documented; do not write a custom Windows named-pipe implementation.
+- **Windows named-pipe transport is a dev-only workaround** (Task 5.1, Task 7.1): asyncio doesn't natively support Windows named pipes for client connect. The plan falls back to TCP loopback for the sidecar's connect side on Windows (sidecar accepts `host:port` via `--pipe`). **This limitation is Windows-dev-only — it does NOT apply to the Linux studio production target.** On Linux, `asyncio.open_unix_connection` connects to the unix domain socket created by Maya's `QLocalServer` natively, no workaround needed. Glass must not "fix" the Windows path by writing a custom Windows named-pipe implementation; the production target doesn't need it, and the Windows TCP loopback is sufficient for the personal-machine smoke test. The Maya-side `QLocalServer` correctly uses named pipes on Windows and unix domain sockets on Linux — Qt handles that transparently.
 
 - **Eval inventory hardcoded in `tests/eval/test_eval_cases.py`** (Task 12.2): `EVAL_INVENTORY` is a literal in the test file rather than dynamically built from real tool classes. This is intentional — it lets eval run without importing any tool implementation modules. Do not refactor to import tool classes.
 
