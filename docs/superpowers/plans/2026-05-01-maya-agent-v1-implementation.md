@@ -353,7 +353,7 @@ git commit -m "feat(core): Tool, ToolArgs, ToolResult base classes"
 import pytest
 from pydantic import ValidationError
 from maya_agent.core.protocol import (
-    ToolInventoryMessage, UserIntentMessage, ClarifyResponseMessage,
+    AuthMessage, ToolInventoryMessage, UserIntentMessage, ClarifyResponseMessage,
     CancelMessage, ToolResultMessage, ToolCallMessage, ThinkingMessage,
     AssistantMessage, ClarifyQuestionMessage, IntentFinishedMessage,
     IntentFailedMessage, parse_message, encode_message,
@@ -400,6 +400,13 @@ def test_parse_rejects_unknown_type():
 def test_parse_rejects_missing_required_field():
     with pytest.raises(ValidationError):
         parse_message({"type": "user_intent", "intent_id": "i1"})  # missing text
+
+
+def test_auth_message_round_trips():
+    m = AuthMessage(session_token="abc-123-def")
+    parsed = parse_message(encode_message(m))
+    assert isinstance(parsed, AuthMessage)
+    assert parsed.session_token == "abc-123-def"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -419,6 +426,12 @@ from __future__ import annotations
 
 from typing import Any, Literal, Union
 from pydantic import BaseModel, Field, TypeAdapter
+
+
+# Sidecar → Maya/panel — must be the first message after connect
+class AuthMessage(BaseModel):
+    type: Literal["auth"] = "auth"
+    session_token: str
 
 
 # Maya/panel → sidecar
@@ -494,9 +507,9 @@ class IntentFailedMessage(BaseModel):
 
 
 Message = Union[
-    ToolInventoryMessage, UserIntentMessage, ClarifyResponseMessage, CancelMessage,
-    ToolResultMessage, ToolCallMessage, ThinkingMessage, AssistantMessage,
-    ClarifyQuestionMessage, IntentFinishedMessage, IntentFailedMessage,
+    AuthMessage, ToolInventoryMessage, UserIntentMessage, ClarifyResponseMessage,
+    CancelMessage, ToolResultMessage, ToolCallMessage, ThinkingMessage,
+    AssistantMessage, ClarifyQuestionMessage, IntentFinishedMessage, IntentFailedMessage,
 ]
 
 _adapter = TypeAdapter(Message, config={"discriminator": "type"})
@@ -517,7 +530,7 @@ def encode_message(msg: Message) -> dict:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/unit/test_protocol.py -v`
-Expected: 6 passed.
+Expected: 7 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -1703,7 +1716,8 @@ from textwrap import dedent
 RESPONSE_SCHEMA: dict = {
     "type": "object",
     "properties": {
-        "thinking": {"type": "string", "description": "Private reasoning, not shown to the user."},
+        "thinking": {"type": "string", "maxLength": 1000,
+                     "description": "Private reasoning, not shown to the user. Be concise."},
         "action": {"type": "string", "enum": ["tool_call", "clarify", "finish"]},
         "tool": {"type": ["string", "null"]},
         "arguments": {"type": ["object", "null"]},
@@ -1715,6 +1729,11 @@ RESPONSE_SCHEMA: dict = {
     "additionalProperties": False,
 }
 
+# Hard ceiling for thinking field, applied Python-side as defense in depth in case
+# the inference engine doesn't honor maxLength. Truncated content is replaced with
+# a marker; the loop logs a WARNING.
+THINKING_HARD_CAP_CHARS = 2000
+
 _PREAMBLE = dedent("""\
     You are a Maya animation assistant working inside the user's Maya session.
     You accomplish tasks by calling tools. You never write or generate Maya code
@@ -1722,7 +1741,7 @@ _PREAMBLE = dedent("""\
 
     ## Response format
     Every response is one JSON object:
-    - thinking: short private reasoning, the user does not see this
+    - thinking: short private reasoning, the user does not see this. Keep under ~200 words.
     - action: "tool_call" | "clarify" | "finish"
 
     For action="tool_call":
@@ -1734,13 +1753,29 @@ _PREAMBLE = dedent("""\
 
     For action="finish":
       user_message: what the user sees as your reply
-      summary: <=3 sentences capturing what was done; this is your memory for future intents
+      summary: <=3 sentences capturing what was done. **Be structural, not narrative.** This
+        is the memory used by future intents (e.g., "now do the same for the legs"). Future-you
+        needs to mechanically copy the structure. Use this format:
+
+          "Called <tool>(<key_args_compactly>) [<count>x if repeated]. Result: <outcome>."
+
+        Examples (good — structural):
+          - "Called fix_euler_discontinuities(objects=[rig:L_arm_FK_CTL, rig:L_arm_FK_2,
+             rig:L_arm_FK_3]). Fixed 7 discontinuities across rotateY."
+          - "Called inspect_scene(deep=true). Found 12 controls in rig: namespace; no mutations."
+          - "Called playblast(output_path='/tmp/shot_010', start=1, end=120). Wrote
+             /tmp/shot_010.mov."
+
+        Counter-examples (bad — narrative, do NOT do this):
+          - "I cleaned up the arm controls successfully."  ← which arms? which controls?
+          - "Did the playblast you asked for."             ← which params? where did it go?
 
     ## Decision policy
     - Prefer to act on the most likely interpretation; explain assumptions in your final user_message.
     - Use clarify only when guessing wrong would mutate the scene in a way expensive to revert.
     - You may clarify at most {max_clarifies} times per intent.
     - After a tool returns an error, read it carefully before retrying — most errors are caused by wrong arguments, not missing capability.
+    - Tools that take a list of targets (e.g., `objects: list[str]`) should be called with the **full list**, not one target per call. Batching keeps the step budget honest.
 """)
 
 
@@ -2115,7 +2150,16 @@ class AgentLoop:
                 messages.append(ChatMessage(role="assistant", content=json.dumps(raw)))
                 trace.append({"step": step, "raw": raw})
 
-                thinking = raw.get("thinking", "")
+                thinking = raw.get("thinking", "") or ""
+                # Defense in depth: truncate runaway thinking even though the schema
+                # enforces maxLength. Engines that don't honor maxLength shouldn't
+                # be able to starve our context with self-talk.
+                from maya_agent.sidecar.prompts import THINKING_HARD_CAP_CHARS
+                if len(thinking) > THINKING_HARD_CAP_CHARS:
+                    _log.warning("thinking field exceeded hard cap (%d chars); truncating",
+                                 len(thinking))
+                    thinking = thinking[:THINKING_HARD_CAP_CHARS] + "...[truncated]"
+                    raw["thinking"] = thinking  # so the trace records the truncated version
                 if thinking:
                     on_event({"type": "thinking", "intent_id": intent_id, "text": thinking})
 
@@ -2287,13 +2331,18 @@ git commit -m "test(sidecar): cross-intent memory bounded ring"
 """Sidecar process entry point.
 
 Usage:
-  python -m maya_agent.sidecar --pipe \\\\.\\pipe\\maya-agent-12345 [--model gemma3:27b]
+  python -m maya_agent.sidecar \
+      --pipe /tmp/maya-agent-12345.sock \
+      --session-token-file ~/.maya-agent/session-12345.token \
+      --model gemma3:27b
 
-Reads --model, --pipe, --ollama-base-url, optional --max-steps from argv.
-Falls back to env vars MAYA_AGENT_MODEL, MAYA_AGENT_PIPE, MAYA_AGENT_OLLAMA_URL.
+Reads --pipe, --model, --session-token(/-file), --ollama-base-url, --max-steps
+from argv. Each has a corresponding env var fallback (MAYA_AGENT_*).
 
-Connects to the named pipe, awaits the tool_inventory message, then services
-user_intent / clarify_response / cancel messages by running the AgentLoop.
+Connects to the named pipe / TCP loopback, sends an auth message with the
+session token, awaits the tool_inventory message (server only sends after
+successful auth), then services user_intent / clarify_response / cancel
+messages by running the AgentLoop.
 """
 from __future__ import annotations
 
@@ -2305,9 +2354,10 @@ import sys
 from pathlib import Path
 
 from maya_agent.core.protocol import (
-    UserIntentMessage, ClarifyResponseMessage, CancelMessage, ToolInventoryMessage,
-    ToolCallMessage, ToolResultMessage, ThinkingMessage, AssistantMessage,
-    ClarifyQuestionMessage, IntentFinishedMessage, IntentFailedMessage, parse_message,
+    AuthMessage, UserIntentMessage, ClarifyResponseMessage, CancelMessage,
+    ToolInventoryMessage, ToolCallMessage, ToolResultMessage, ThinkingMessage,
+    AssistantMessage, ClarifyQuestionMessage, IntentFinishedMessage, IntentFailedMessage,
+    parse_message,
 )
 from maya_agent.sidecar.agent_loop import AgentLoop, IntentRequest
 from maya_agent.sidecar.maya_client import MayaClient
@@ -2317,11 +2367,16 @@ from maya_agent.sidecar.ollama_client import OllamaClient
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="maya-agent-sidecar")
     p.add_argument("--pipe", default=os.environ.get("MAYA_AGENT_PIPE"),
-                   help="Named pipe / unix socket path the Maya panel is listening on")
+                   help="Named pipe / unix socket path the Maya panel is listening on. "
+                        "On Windows dev, may be 'host:port' for TCP loopback.")
     p.add_argument("--model", default=os.environ.get("MAYA_AGENT_MODEL"),
                    help="LLM model identifier (e.g., gemma3:27b)")
     p.add_argument("--ollama-base-url", default=os.environ.get(
         "MAYA_AGENT_OLLAMA_URL", "http://localhost:11434"))
+    p.add_argument("--session-token", default=os.environ.get("MAYA_AGENT_SESSION_TOKEN"),
+                   help="Session token expected by the Maya panel (literal value).")
+    p.add_argument("--session-token-file", default=os.environ.get("MAYA_AGENT_SESSION_TOKEN_FILE"),
+                   help="Path to a file containing the session token. Read at startup.")
     p.add_argument("--max-steps", type=int, default=20)
     p.add_argument("--log-file", default=None)
     args = p.parse_args()
@@ -2329,7 +2384,16 @@ def _parse_args() -> argparse.Namespace:
         p.error("--pipe is required (or set MAYA_AGENT_PIPE)")
     if not args.model:
         p.error("--model is required (or set MAYA_AGENT_MODEL)")
+    if not args.session_token and not args.session_token_file:
+        p.error("--session-token or --session-token-file is required "
+                "(or set MAYA_AGENT_SESSION_TOKEN / MAYA_AGENT_SESSION_TOKEN_FILE)")
     return args
+
+
+def _load_session_token(args: argparse.Namespace) -> str:
+    if args.session_token:
+        return args.session_token.strip()
+    return Path(args.session_token_file).read_text(encoding="utf-8").strip()
 
 
 def _setup_logging(log_file: str | None) -> None:
@@ -2386,15 +2450,15 @@ async def _main() -> int:
     _setup_logging(args.log_file)
     log = logging.getLogger("sidecar")
 
+    session_token = _load_session_token(args)
     log.info("Connecting to %s", args.pipe)
     client = MayaClient()
 
     if sys.platform == "win32":
-        # On Windows, use a thread-based bridge for named pipes (asyncio doesn't
-        # natively support Windows named pipes for connect; we use the pipe path
-        # as a TCP loopback for v1 development OR implement via win32 calls).
-        # For v1 simplicity: support pipe paths that are actually "host:port"
-        # for development, and document named-pipe support as v1.1.
+        # On Windows, asyncio doesn't natively support named-pipe client connect.
+        # Dev-machine workaround: accept "host:port" form and use TCP loopback.
+        # Linux production uses connect_pipe() against the unix domain socket
+        # (asyncio.open_unix_connection — fully supported, no workaround).
         if ":" in args.pipe:
             host, port = args.pipe.rsplit(":", 1)
             await client.connect_tcp(host, int(port))
@@ -2404,13 +2468,19 @@ async def _main() -> int:
     else:
         await client.connect_pipe(args.pipe)
 
-    # Wait for the inventory handshake
+    # Auth handshake: send our session token first, before anything else.
+    # Server validates with constant-time compare; on mismatch it closes the
+    # connection silently and we fail at the next receive().
+    await client.send(AuthMessage(session_token=session_token))
+
     msg = await client.receive()
     if not isinstance(msg, ToolInventoryMessage):
-        log.error("First message was not tool_inventory: %s", type(msg).__name__)
+        log.error("First message after auth was not tool_inventory: %s "
+                  "(connection likely rejected by server — bad token?)",
+                  type(msg).__name__)
         return 3
     inventory = msg.tools
-    log.info("Received inventory: %d tools", len(inventory))
+    log.info("Auth accepted; received inventory: %d tools", len(inventory))
 
     transport = _MayaTransport(client)
     llm = OllamaClient(base_url=args.ollama_base_url)
@@ -2485,9 +2555,14 @@ git commit -m "feat(sidecar): __main__ entry point wires MayaClient + AgentLoop 
 ```python
 """QLocalServer that accepts the sidecar connection and exchanges length-prefixed
 JSON frames. Inbound frames are emitted as Qt signals on the main thread.
+
+Auth: incoming connections must send an AuthMessage with the expected session
+token before any other message. client_connected emits only after auth succeeds;
+on auth failure the socket is dropped silently.
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 from typing import Callable
@@ -2495,7 +2570,7 @@ from typing import Callable
 from PySide6 import QtCore, QtNetwork
 
 from maya_agent.core.frames import FrameDecoder, FrameError, encode_frame
-from maya_agent.core.protocol import Message, encode_message, parse_message
+from maya_agent.core.protocol import AuthMessage, Message, encode_message, parse_message
 
 _log = logging.getLogger(__name__)
 
@@ -2510,26 +2585,34 @@ def default_pipe_path() -> str:
 class CommandServer(QtCore.QObject):
     """Owns a QLocalServer + a single client socket (the sidecar).
 
-    Emits message_received(Message) when a frame is fully decoded. Send messages
-    via send_message() — works whether or not the client is currently connected
-    (queued and flushed on connect).
+    Emits message_received(Message) for messages received AFTER successful auth.
+    Send messages via send_message() — works whether or not the client is connected
+    (queued and flushed after auth succeeds, never before).
     """
 
     message_received = QtCore.Signal(object)  # Message instance
-    client_connected = QtCore.Signal()
+    client_connected = QtCore.Signal()         # emitted only after auth success
     client_disconnected = QtCore.Signal()
 
-    def __init__(self, pipe_name: str | None = None, parent: QtCore.QObject | None = None) -> None:
+    def __init__(
+        self,
+        expected_session_token: str,
+        pipe_name: str | None = None,
+        parent: QtCore.QObject | None = None,
+    ) -> None:
         super().__init__(parent)
+        if not expected_session_token:
+            raise ValueError("expected_session_token must be a non-empty string")
+        self._expected_token = expected_session_token
         self._pipe_name = pipe_name or default_pipe_path()
         self._server = QtNetwork.QLocalServer(self)
         self._server.newConnection.connect(self._on_new_connection)
         self._socket: QtNetwork.QLocalSocket | None = None
+        self._authed: bool = False
         self._decoder = FrameDecoder()
         self._send_queue: list[bytes] = []
 
     def start(self) -> None:
-        # Remove any stale socket file (Linux/macOS)
         QtNetwork.QLocalServer.removeServer(self._pipe_name)
         if not self._server.listen(self._pipe_name):
             raise RuntimeError(
@@ -2549,7 +2632,11 @@ class CommandServer(QtCore.QObject):
         return self._pipe_name
 
     def is_connected(self) -> bool:
-        return self._socket is not None and self._socket.state() == QtNetwork.QLocalSocket.ConnectedState
+        return (
+            self._socket is not None
+            and self._authed
+            and self._socket.state() == QtNetwork.QLocalSocket.ConnectedState
+        )
 
     def send_message(self, msg: Message) -> None:
         frame = encode_frame(encode_message(msg))
@@ -2557,25 +2644,20 @@ class CommandServer(QtCore.QObject):
             self._socket.write(frame)
             self._socket.flush()
         else:
+            # Queue messages from the panel — flushed only after auth succeeds.
             self._send_queue.append(frame)
 
     def _on_new_connection(self) -> None:
         if self._socket is not None:
-            # Reject second connection
             extra = self._server.nextPendingConnection()
             extra.disconnectFromServer()
             return
         self._socket = self._server.nextPendingConnection()
+        self._authed = False
+        self._decoder = FrameDecoder()
         self._socket.readyRead.connect(self._on_ready_read)
         self._socket.disconnected.connect(self._on_disconnected)
-        # Flush queued frames
-        for frame in self._send_queue:
-            self._socket.write(frame)
-        self._socket.flush()
-        self._send_queue.clear()
-        self._decoder = FrameDecoder()
-        self.client_connected.emit()
-        _log.info("Sidecar client connected")
+        _log.info("Sidecar client connected (awaiting auth)")
 
     def _on_ready_read(self) -> None:
         if self._socket is None:
@@ -2588,15 +2670,43 @@ class CommandServer(QtCore.QObject):
                 except Exception:
                     _log.exception("Invalid incoming message")
                     continue
+                if not self._authed:
+                    self._handle_auth(msg)
+                    continue
                 self.message_received.emit(msg)
         except FrameError:
             _log.exception("Frame decode error; closing socket")
             self._socket.disconnectFromServer()
 
+    def _handle_auth(self, msg: Message) -> None:
+        """Validate the first message. Must be AuthMessage with the expected token."""
+        if not isinstance(msg, AuthMessage):
+            # Don't log the offered content — could leak. Just close.
+            _log.warning("First message was not auth; closing connection")
+            self._socket.disconnectFromServer()
+            return
+        if not hmac.compare_digest(msg.session_token, self._expected_token):
+            _log.warning("Auth failed (token mismatch); closing connection")
+            self._socket.disconnectFromServer()
+            return
+        self._authed = True
+        # Flush queued outbound frames now that we're authenticated
+        for frame in self._send_queue:
+            self._socket.write(frame)
+        self._socket.flush()
+        self._send_queue.clear()
+        _log.info("Auth succeeded; sidecar fully connected")
+        self.client_connected.emit()
+
     def _on_disconnected(self) -> None:
-        _log.info("Sidecar client disconnected")
+        was_authed = self._authed
         self._socket = None
-        self.client_disconnected.emit()
+        self._authed = False
+        if was_authed:
+            _log.info("Sidecar client disconnected")
+            self.client_disconnected.emit()
+        else:
+            _log.info("Pre-auth client disconnected")
 ```
 
 - [ ] **Step 2: Commit**
@@ -2811,6 +2921,8 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
+import stat
 import subprocess
 import sys
 import uuid
@@ -2861,15 +2973,36 @@ class _ToolEntry(_ChatItem):
         self._header.setText(f"{icon} {self._tool}")
 
 
+def _write_session_token() -> tuple[str, Path]:
+    """Generate a 32-byte URL-safe token, write to ~/.maya-agent/session-<pid>.token
+    with 0600 permissions, return (token, file_path)."""
+    token = secrets.token_urlsafe(32)
+    token_dir = Path.home() / ".maya-agent"
+    token_dir.mkdir(parents=True, exist_ok=True)
+    path = token_dir / f"session-{os.getpid()}.token"
+    path.write_text(token, encoding="utf-8")
+    try:
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 0600 — owner read/write only
+    except OSError:
+        # Windows: chmod has limited effect; ACL enforcement is via file location in user profile
+        pass
+    return token, path
+
+
 class MayaAgentPanel(QtWidgets.QWidget):
     def __init__(self, registry: ToolRegistry, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._registry = registry
         self._dispatcher = ToolDispatcher(registry)
-        self._server = CommandServer()
+        self._session_token, self._token_file = _write_session_token()
+        self._server = CommandServer(expected_session_token=self._session_token)
         self._sidecar_process: subprocess.Popen | None = None
         self._tool_entries: dict[str, _ToolEntry] = {}  # call_id -> entry
         self._current_intent_id: str | None = None
+        # Outer undo chunks per active intent. Maya supports nested chunks; we
+        # open one outer chunk per intent so a single Ctrl+Z reverts the whole
+        # agentic action (each tool's mutating wrapper opens its own inner chunk).
+        self._intent_chunks_open: set[str] = set()
 
         self._build_ui()
         self._wire_signals()
@@ -2940,13 +3073,33 @@ class MayaAgentPanel(QtWidgets.QWidget):
             return
         intent_id = str(uuid.uuid4())
         self._current_intent_id = intent_id
+        self._open_intent_chunk(intent_id, text)
         self._add_chat(_MessageItem("User", text))
         self._input.clear()
         self._stop_btn.show()
-        if self._current_intent_id:  # waiting for clarify?
-            # If we're between turns and the agent asked a question, treat input as the answer
-            pass
         self._server.send_message(UserIntentMessage(intent_id=intent_id, text=text))
+
+    def _open_intent_chunk(self, intent_id: str, intent_text: str) -> None:
+        """Open an outer undo chunk for the whole intent. One Ctrl+Z reverts the
+        entire agentic action regardless of how many mutating tools ran inside."""
+        try:
+            from maya import cmds
+            short = intent_text.replace("\n", " ")[:50]
+            cmds.undoInfo(openChunk=True, chunkName=f"agent: {short}")
+            self._intent_chunks_open.add(intent_id)
+        except Exception:
+            _log.exception("Failed to open intent undo chunk for %s", intent_id)
+
+    def _close_intent_chunk(self, intent_id: str) -> None:
+        if intent_id not in self._intent_chunks_open:
+            return
+        try:
+            from maya import cmds
+            cmds.undoInfo(closeChunk=True)
+        except Exception:
+            _log.exception("Failed to close intent undo chunk for %s", intent_id)
+        finally:
+            self._intent_chunks_open.discard(intent_id)
 
     def _on_undo_clicked(self) -> None:
         try:
@@ -2973,10 +3126,10 @@ class MayaAgentPanel(QtWidgets.QWidget):
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / f"sidecar-{os.getpid()}.log"
         env = os.environ.copy()
-        # Sidecar reads pipe path + model from env or args
         cmd = [
             sys.executable, "-m", "maya_agent.sidecar",
             "--pipe", self._server.full_pipe_path(),
+            "--session-token-file", str(self._token_file),
             "--log-file", str(log_file),
         ]
         if env.get("MAYA_AGENT_MODEL"):
@@ -2996,7 +3149,10 @@ class MayaAgentPanel(QtWidgets.QWidget):
         self._update_status_disconnected()
 
     def _update_status_disconnected(self) -> None:
-        self._status_label.setText(f"● Disconnected — pipe at {self._server.full_pipe_path()}")
+        self._status_label.setText(
+            f"● Disconnected — pipe: {self._server.full_pipe_path()} | "
+            f"token-file: {self._token_file}"
+        )
         self._status_label.setStyleSheet("color: #888; padding: 4px;")
         self._stop_btn.hide()
 
@@ -3021,10 +3177,12 @@ class MayaAgentPanel(QtWidgets.QWidget):
             self._send_btn.clicked.connect(lambda: self._send_clarify_response(msg.intent_id))
         elif isinstance(msg, IntentFinishedMessage):
             self._add_chat(_MessageItem("Agent", msg.user_message))
+            self._close_intent_chunk(msg.intent_id)
             self._stop_btn.hide()
             self._current_intent_id = None
         elif isinstance(msg, IntentFailedMessage):
             self._add_chat(_MessageItem("Agent (failed)", msg.error))
+            self._close_intent_chunk(msg.intent_id)
             self._stop_btn.hide()
             self._current_intent_id = None
         elif isinstance(msg, ThinkingMessage):
@@ -3756,6 +3914,10 @@ class EvalCase:
     allow_extra_calls: bool
     terminal_action: str
     max_steps: int
+    # If set, bypass live/record/replay and use these LLM responses in order.
+    # Used by cases that need to deliberately inject malformed assistant output
+    # to verify the agent's parse-error / recovery paths.
+    scripted_llm_responses: list[dict] | None = None
 
 
 def load_case(path: Path) -> EvalCase:
@@ -3776,7 +3938,21 @@ def load_case(path: Path) -> EvalCase:
         allow_extra_calls=data.get("allow_extra_calls", True),
         terminal_action=data.get("terminal_action", "finish"),
         max_steps=data.get("max_steps", 20),
+        scripted_llm_responses=data.get("scripted_llm_responses"),
     )
+
+
+class ScriptedLLMClient:
+    """Returns scripted responses in order. Used by cases with scripted_llm_responses."""
+
+    def __init__(self, responses: list[dict]) -> None:
+        self._responses = list(responses)
+
+    async def generate_structured(self, messages, json_schema, *, model,
+                                  temperature: float = 0.0, timeout_s: float = 120.0) -> dict:
+        if not self._responses:
+            raise RuntimeError("scripted LLM exhausted")
+        return self._responses.pop(0)
 
 
 class MockMayaClient:
@@ -3869,7 +4045,7 @@ from maya_agent.sidecar.agent_loop import AgentLoop, IntentRequest
 from maya_agent.sidecar.ollama_client import OllamaClient
 
 from tests.eval.runner import (
-    load_case, MockMayaClient, build_llm_client, get_eval_mode,
+    load_case, MockMayaClient, ScriptedLLMClient, build_llm_client, get_eval_mode,
 )
 from tests.eval.matchers import assert_calls_match
 
@@ -3912,11 +4088,15 @@ def _real_llm_factory():
 @pytest.mark.parametrize("case_path", sorted(CASES_DIR.glob("*.json")))
 def test_eval_case(case_path):
     case = load_case(case_path)
-    mode = get_eval_mode()
-    llm = build_llm_client(
-        mode=mode, case_name=case.name,
-        recordings_dir=RECORDINGS_DIR, real_factory=_real_llm_factory,
-    )
+    if case.scripted_llm_responses is not None:
+        # Bypass live/record/replay — case has scripted LLM responses
+        llm = ScriptedLLMClient(case.scripted_llm_responses)
+    else:
+        mode = get_eval_mode()
+        llm = build_llm_client(
+            mode=mode, case_name=case.name,
+            recordings_dir=RECORDINGS_DIR, real_factory=_real_llm_factory,
+        )
     maya = MockMayaClient(case.fixture_observations, case.clarify_responses)
     loop = AgentLoop(
         llm=llm, maya=maya, inventory=EVAL_INVENTORY,
@@ -3951,7 +4131,7 @@ git commit -m "test(eval): runner, MockMayaClient, parameterized case test"
 
 ## Phase 13 — Initial eval cases
 
-### Task 13.1: Write the six case files
+### Task 13.1: Write the seven case files
 
 **Files:**
 - Create: `tests/eval/cases/euler_cleanup_basic.json`
@@ -3960,6 +4140,7 @@ git commit -m "test(eval): runner, MockMayaClient, parameterized case test"
 - Create: `tests/eval/cases/tool_error_recovery.json`
 - Create: `tests/eval/cases/unknown_tool_request.json`
 - Create: `tests/eval/cases/step_limit_exceeded.json`
+- Create: `tests/eval/cases/malformed_response_recovery.json`
 
 - [ ] **Step 1: Write `euler_cleanup_basic.json`**
 
@@ -4141,11 +4322,48 @@ git commit -m "test(eval): runner, MockMayaClient, parameterized case test"
 }
 ```
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Write `malformed_response_recovery.json`**
+
+This case bypasses live/record/replay via `scripted_llm_responses`. It pins the
+agent's parse-error recovery path: the model emits a schema-conforming but
+semantically broken response (`action=tool_call` with `tool=null`), the loop
+injects a `[parse_error]` observation, the model recovers on the next turn.
+This is the regression that bites during model bumps if grammar enforcement
+slips — a fixture-driven case keeps it locked in.
+
+```json
+{
+  "name": "malformed_response_recovery",
+  "description": "Verify the parse-error retry path: schema-conforming but broken first response, valid second response.",
+  "intent": "do something",
+  "clarify_responses": [],
+  "fixture_observations": [],
+  "scripted_llm_responses": [
+    {
+      "thinking": "I'll call a tool",
+      "action": "tool_call",
+      "tool": null,
+      "arguments": null
+    },
+    {
+      "thinking": "I see the parse_error; I'll just finish",
+      "action": "finish",
+      "user_message": "I couldn't proceed because of a malformed earlier step.",
+      "summary": "Aborted on parse_error after first turn."
+    }
+  ],
+  "expected_calls": [],
+  "allow_extra_calls": true,
+  "terminal_action": "finish",
+  "max_steps": 5
+}
+```
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add tests/eval/cases/
-git commit -m "test(eval): six initial eval cases (basic, ambiguous, playblast, error, unknown, step-limit)"
+git commit -m "test(eval): seven initial eval cases (incl. malformed_response_recovery)"
 ```
 
 ---
@@ -4241,7 +4459,7 @@ from tools_common import Tool, ToolArgs, ToolResult
 
 
 class MyToolArgs(ToolArgs):
-    target: str = Field(..., description="Node path to operate on.")
+    targets: list[str] = Field(..., description="Node paths to operate on.")
     mode: str = Field("default", description="One of 'default', 'aggressive'.")
 
 
@@ -4254,11 +4472,35 @@ class MyTool(Tool):
     def execute(self, args, *, cancel_token=None):
         from maya import cmds   # lazy: see lazy-import rule
         try:
-            cmds.someOperation(args.target, mode=args.mode)
-            return ToolResult(ok=True, value={"target": args.target})
+            for target in args.targets:
+                cmds.someOperation(target, mode=args.mode)
+            return ToolResult(ok=True, value={"processed": args.targets})
         except Exception as e:
             return ToolResult(ok=False, error=f"{type(e).__name__}: {e}")
 ```
+
+## Batch by default — tools take lists, not singletons
+
+**Tools should operate over lists of targets.** Prefer `targets: list[str]` over
+`target: str`. The agent has a 20-step circuit breaker, and a workflow like
+*"clean up the arms"* naturally hits 8+ FK controls × 2 arms × inspect+fix.
+A singleton-per-call tool burns the budget on workflow shape rather than work.
+
+Reasons:
+
+1. **Step budget** — one batched call processes everything; doesn't pressure the
+   agent's max-steps limit.
+2. **Undo atomicity** — one tool call → one inner undo chunk wrapping the whole
+   batch (plus the outer per-intent chunk). User undoes a whole batch with one
+   keystroke.
+3. **Round-trip cost** — one sidecar↔Maya frame, not N. Latency compounds.
+4. **LLM reasoning** — the model's context shrinks: fewer turns to plan, fewer
+   observations to track. Better outputs.
+
+If a tool is genuinely scalar (e.g., `set_current_frame(frame: float)`), keep
+it scalar. But anything that operates on nodes, attributes, or curves takes a
+list. The five framework example tools all follow this — use them as
+references.
 
 ## Lazy-import rule
 

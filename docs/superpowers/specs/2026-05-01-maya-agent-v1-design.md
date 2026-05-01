@@ -58,7 +58,7 @@ The Maya-side code (`QLocalServer`, panel, dispatcher) is identical across platf
 | 3 | Plugin discovery via `MAYA_AGENT_PLUGIN_PATHS` env var, directory scan, optional `plugin.toml`, first-write-wins with WARNING | Matches how VFX studios already distribute Python code; no pip-install-into-Maya step |
 | 4 | Best-interpretation + opt-in `clarify` (cap 3/intent), per-intent summaries as cross-intent memory (last 10), `action` discriminator schema with `thinking` field | Balances autonomy with safety on ambiguity; bounded memory prevents context explosion |
 | 5 | Tool-call recorder + fixture observations as primary eval, `mayapy` integration eval as opt-in second tier; three-matcher sequence syntax with `allow_extra_calls` | Catches the failure mode that actually matters during prompt iteration (wrong tool, wrong order); avoids the tar pit of maintaining a stateful mock scene |
-| 6 | No checkpoints — rely on Maya undo chunks per tool call | Maya's undo covers ~95% of what checkpoints would; tool authors mark file/shell ops as `mutating: bool` for log labeling |
+| 6 | No scene-state checkpoints — rely on Maya undo chunks. Each mutating tool call wraps in its own `cmds.undoInfo` chunk; the **whole intent** also wraps in an outer chunk so a single Ctrl+Z reverts the entire agentic action | Maya's undo covers ~95% of what scene checkpoints would. Per-tool chunks make individual reverts possible; the outer per-intent chunk is the UX-critical bit — animators trust the tool the first time it does something unexpected and they hit one Ctrl+Z to back out. Tool-author guideline: **operate over lists of targets** (`objects: list[str]`, not `obj: str`) so one tool call processes a whole batch under one undo chunk and one sidecar↔Maya round-trip |
 | 7 | LLM backend abstracted behind `LLMClient` Protocol; `OllamaClient` is one implementation | Trivial abstraction (~6 lines), allows swap to vLLM / OpenAI-compatible / internal endpoint without agent-loop changes |
 | 8 | Soft-cancel by default, opt-in fast-cancel via `cancel_token` parameter | Default is right for fast tools (most); long-running tools opt in; checkpoint absence makes "in-flight call finishes" safe enough |
 
@@ -298,8 +298,11 @@ V1 implementations:
 **Messages** (all carry `type` discriminator):
 
 ```python
+# Sidecar → Maya/panel  (must be the first message after connect)
+{"type": "auth", "session_token": str}
+
 # Maya/panel → sidecar
-{"type": "tool_inventory", "tools": [<inventory entry>, ...]}     # handshake on connect
+{"type": "tool_inventory", "tools": [<inventory entry>, ...]}     # sent only after auth succeeds
 {"type": "user_intent",       "intent_id": str, "text": str}
 {"type": "clarify_response",  "intent_id": str, "text": str}
 {"type": "cancel",            "intent_id": str}
@@ -316,14 +319,23 @@ V1 implementations:
 {"type": "intent_failed",      "intent_id": str, "error": str}
 ```
 
+**Authentication & session token.** The threat model on a Linux unix domain socket is "local user" and OS ACLs handle it. On the Windows TCP loopback fallback (dev only), anything on the box can reach 127.0.0.1, so we add a session token. To keep the protocol uniform across transports, **auth is mandatory on both** — costs nothing on Linux, defends Windows dev:
+
+- Panel generates a 32-byte URL-safe token via `secrets.token_urlsafe()` at server startup.
+- Token is written to `~/.maya-agent/session-<pid>.token` with `0600` permissions; also displayed in the panel status bar.
+- Server binds to 127.0.0.1 explicitly (TCP fallback) and listens on the configured pipe (Linux) or named pipe (Windows).
+- Sidecar reads the token from `--session-token-file <path>` (CLI) or `MAYA_AGENT_SESSION_TOKEN` (env).
+- Sidecar's first message after connect is `auth`. The server validates with `hmac.compare_digest` (constant time). On match, sends `tool_inventory`; on mismatch, closes the connection silently without logging the offered token.
+
 **Connection lifecycle:**
 
-1. Maya boots, panel starts `QLocalServer` on `\\.\pipe\maya-agent-<pid>` (or `/tmp/maya-agent-<pid>.sock` on Linux). Pipe path shown in panel UI.
-2. Sidecar started (manually via terminal or via panel "Start agent" button).
+1. Maya boots, panel generates session token, writes to `~/.maya-agent/session-<pid>.token`, starts `QLocalServer` on `\\.\pipe\maya-agent-<pid>` (or `/tmp/maya-agent-<pid>.sock` on Linux). Pipe path and token-file path shown in panel UI.
+2. Sidecar started (manually via terminal or via panel "Start agent" button); receives token-file path via CLI or env.
 3. Sidecar connects.
-4. Maya immediately sends `tool_inventory`. Sidecar builds prompts and response JSON schema from this inventory.
-5. Panel can send `user_intent`.
-6. Connection drop → both sides clean up; in-flight intent abandoned; panel offers reconnect.
+4. Sidecar's first frame is `{"type": "auth", "session_token": "..."}`.
+5. Maya validates the token in constant time. On mismatch, closes the connection silently. On match, sends `tool_inventory`. Sidecar builds prompts and response JSON schema from this inventory.
+6. Panel can send `user_intent`.
+7. Connection drop → both sides clean up; in-flight intent abandoned; panel offers reconnect.
 
 ## Plugin System
 
@@ -348,7 +360,8 @@ V1 implementations:
 RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
-        "thinking":     {"type": "string", "description": "Private reasoning. The user does not see this."},
+        "thinking":     {"type": "string", "maxLength": 1000,
+                         "description": "Private reasoning. The user does not see this. Be concise."},
         "action":       {"type": "string", "enum": ["tool_call", "clarify", "finish"]},
         "tool":         {"type": ["string", "null"]},
         "arguments":    {"type": ["object", "null"]},
@@ -446,7 +459,12 @@ Tools opt in to fast-cancel by declaring a `cancel_token` parameter in `execute`
 ### Summary generation
 
 Two parallel records per intent:
-- **Narrative summary** — the model's `finish.summary` field. Stored as text. Used as cross-intent memory in future prompts.
+- **Structural summary** — the model's `finish.summary` field. Stored as text. Used as cross-intent memory in future prompts. The system prompt is **prescriptive about format**: the model is told to emit structural recall (which tools were called with which key args, what the outcome was) rather than narrative ("I cleaned up the arms"). This matters because *"do the same for the legs"* only works if the prior summary captures **what** was done in a way the model can mechanically copy. Example structural form:
+  > *"Called fix_euler_discontinuities(objects=[rig:L_arm_FK_CTL, rig:L_arm_FK_2, rig:L_arm_FK_3]). Fixed 7 discontinuities across rotateY."*
+
+  vs. the narrative form we explicitly avoid:
+  > *"I cleaned up the arm controls successfully."*
+
 - **Factual trace metadata** — `(tool_name, ok, args_summary)` tuples extracted from the loop. Used by the panel's "previous intents" view and the eval harness. Never feeds back into prompts.
 
 ### Observation context (deferred decision)
@@ -548,8 +566,19 @@ CI fails if any case has no recording (prevents accidental skip).
 3. **Main-thread blocking during tool execution.** Inherent to `cmds`; documented in `writing-a-tool.md`. Long tools should call `cmds.refresh()` periodically and use `cmds.progressBar`.
 4. **Plugin import errors compound.** Studio plugin repos accumulate; warning banner can become permanent. Mitigation: surface failed plugins with one-click traceback access, and add `--strict` mode for CI/install verification.
 5. **Cancel-semantics drift.** Soft-cancel + opt-in fast-cancel is two contracts. Tool authors might not realize they can opt in. Mitigation: docs page + a `make_cancellable_tool` decorator if it becomes a pain point in v2.
-6. **No state divergence detection.** If the user manually edits the scene during an intent, the agent's prior observations are stale. v1 doesn't detect this. v2 candidate: scene state digest in `tool_result`.
+6. **No state-divergence detection in v1 — blocks studio rollout in v1.5.** Animators alt-tab, scrub timeline, pose-test, and undo while the agent is running. The agent's prior observations go stale. v1 ships without detection on the assumption that personal-machine smoke testing is forgiving; this is **explicitly tagged as the gating issue for studio deployment**, not "later if it bites." v1.5 implementation:
+   ```python
+   def _scene_digest() -> str:
+       return hashlib.sha256(repr((
+           tuple(cmds.ls(selection=True, long=True) or []),
+           cmds.currentTime(query=True),
+           cmds.file(query=True, modified=True),
+           cmds.file(query=True, sceneName=True),
+       )).encode()).hexdigest()
+   ```
+   Capture at intent start, re-check before each mutating tool call. On mismatch, dispatcher returns `{ok: false, error: "scene_diverged: user edited the scene; re-inspect"}` — the agent's existing error-recovery path handles it (re-call inspect_scene, proceed).
 7. **Observation context growth.** Single-tool-per-turn loops can run 10-20 calls. Each observation lives verbatim in context. Mitigation if needed: stale-replacement (deferred).
+8. **Tool-author discipline on batching.** Tools that take a single target (`obj: str`) instead of a list will burn through the 20-step circuit breaker on workflows like *"clean up the arm controls"* (8+ FK ctrls × inspect+fix = 16+ turns). Mitigation: framework guideline — tools take `objects: list[str]` and iterate Maya-side. Documented in `writing-a-tool.md` and called out in Decision #6 rationale. The five framework example tools all follow this convention as reference.
 
 ## Success Criteria for v1
 
@@ -568,5 +597,15 @@ CI fails if any case has no recording (prevents accidental skip).
 - **Streaming responses** — add when prompt iteration stabilizes; Ollama supports streaming structured output
 - **Multi-tool parallelism** — would require schema changes; no current need
 - **Prompt caching** — add when stable on Gemma 4 at the studio; expected meaningful latency win
-- **Scene state digest** — for state divergence detection if it becomes an issue
+- **Scene-state digest for divergence detection** — **v1.5 (gates studio rollout per Risks §6).** Capture digest at intent start, re-check before each mutating call, return `scene_diverged` error on mismatch.
+- **`scope_estimator` hook for blast-radius confirmation** — v1.5 candidate. Optional method on `Tool`:
+  ```python
+  class Tool:
+      def scope_estimator(self, args) -> int | None:
+          """Optional. Estimated count of nodes/keys/etc. this call will affect.
+          Return None if unknown. Dispatcher prompts the user when scope exceeds
+          MAYA_AGENT_SCOPE_PROMPT_THRESHOLD (default: 100)."""
+          return None
+  ```
+  When dispatcher sees scope > threshold, sends a `scope_warning` message; panel prompts; user confirms or cancels. Most tools don't bother to implement; the few that touch lots of nodes (e.g., `delete_keys` over a hierarchy) opt in. Per-invocation gating without burdening the LLM or every tool author.
 - **MCP server wrapping** — could expose the tool inventory as an MCP server later, for non-Maya agents to drive Maya. Out of v1 but a clean future extension given the architecture.

@@ -84,11 +84,19 @@ These tasks reference resources that may not be available; honor the skip rules:
 
 - **Task 14.2 (manual smoke test in Maya):** This is the human's responsibility, not Glass's. After Task 14.1 commits, write `docs/smoke-test-instructions.md` summarizing the steps the human will follow. Do NOT attempt to launch Maya, run the panel, or claim success on this task.
 
+## Mandatory in v1 (do not skip these — they are not optional)
+
+After external review, two additions became v1-mandatory:
+
+- **Auth handshake.** Both transports require a session-token handshake. Maya panel generates the token at startup, writes to `~/.maya-agent/session-<pid>.token` (0600), and only sends `tool_inventory` after the sidecar's first message is a valid `AuthMessage`. The sidecar reads the token from `--session-token-file` (CLI) or `MAYA_AGENT_SESSION_TOKEN` (env) and sends `AuthMessage` as its first frame. Mismatched tokens cause silent connection drop. Implementation is fully specified across Task 2.2 (protocol), Task 7.1 (sidecar), Task 8.1 (server), Task 9.1 (panel) — Glass must wire all four.
+
+- **Outer per-intent undo chunk.** The panel opens `cmds.undoInfo(openChunk=True, chunkName=f"agent: {short_intent_text}")` when sending a `user_intent`, closes on `intent_finished` or `intent_failed`. Nests with per-tool inner chunks. Implementation in Task 9.1.
+
 ## Known plan gaps — do not fix unilaterally
 
 The following are deliberate v1 limitations the plan acknowledges. Glass should NOT try to "fix" them by writing extra code:
 
-- **Windows named-pipe transport is a dev-only workaround** (Task 5.1, Task 7.1): asyncio doesn't natively support Windows named pipes for client connect. The plan falls back to TCP loopback for the sidecar's connect side on Windows (sidecar accepts `host:port` via `--pipe`). **This limitation is Windows-dev-only — it does NOT apply to the Linux studio production target.** On Linux, `asyncio.open_unix_connection` connects to the unix domain socket created by Maya's `QLocalServer` natively, no workaround needed. Glass must not "fix" the Windows path by writing a custom Windows named-pipe implementation; the production target doesn't need it, and the Windows TCP loopback is sufficient for the personal-machine smoke test. The Maya-side `QLocalServer` correctly uses named pipes on Windows and unix domain sockets on Linux — Qt handles that transparently.
+- **Windows named-pipe transport is a dev-only workaround** (Task 5.1, Task 7.1): asyncio doesn't natively support Windows named pipes for client connect. The plan falls back to TCP loopback for the sidecar's connect side on Windows (sidecar accepts `host:port` via `--pipe`). **This limitation is Windows-dev-only — it does NOT apply to the Linux studio production target.** On Linux, `asyncio.open_unix_connection` connects to the unix domain socket created by Maya's `QLocalServer` natively, no workaround needed. Glass must not "fix" the Windows path by writing a custom Windows named-pipe implementation; the production target doesn't need it, and the Windows TCP loopback is sufficient for the personal-machine smoke test. The Maya-side `QLocalServer` correctly uses named pipes on Windows and unix domain sockets on Linux — Qt handles that transparently. **Note:** the auth handshake closes the security gap that the TCP loopback would otherwise create.
 
 - **Eval inventory hardcoded in `tests/eval/test_eval_cases.py`** (Task 12.2): `EVAL_INVENTORY` is a literal in the test file rather than dynamically built from real tool classes. This is intentional — it lets eval run without importing any tool implementation modules. Do not refactor to import tool classes.
 
@@ -122,7 +130,9 @@ The following are deliberate v1 limitations the plan acknowledges. Glass should 
 Do not implement these even if convenient:
 
 - Scene-state checkpoints
-- Confirmation gating for "dangerous" tools
+- Confirmation gating for "dangerous" tools (per-tool flag — superseded by the v1.5 `scope_estimator` design)
+- `scope_estimator` hook on tools — **v1.5 design captured in spec; not v1.** Do not add a `scope_estimator` method to the `Tool` ABC, do not wire any `scope_warning` message into the protocol, do not add threshold config.
+- Scene-state digest for divergence detection — **v1.5 design captured in spec; not v1.** Do not add `_scene_digest()` to the dispatcher, do not capture state per intent, do not return `scene_diverged` errors. Spec tags this as the gating issue for studio rollout, not v1.
 - Hot reload of plugins
 - Streaming token-level responses
 - Parallel tool calls
@@ -132,7 +142,6 @@ Do not implement these even if convenient:
 - Stale-replacement of older observations (deferred per spec)
 - Prompt caching (deferred until Gemma 4 at the studio)
 - Live integration eval execution against `mayapy` (stub file only)
-- Authentication on the named pipe
 - Telemetry beyond stdlib `logging`
 
 ## Status tracking
