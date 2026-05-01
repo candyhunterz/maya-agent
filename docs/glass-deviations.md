@@ -11,3 +11,8 @@ Append-only log of every place where Glass adapted away from the plan's literal 
 **Plan said:** `f.write_text(textwrap.dedent(body))` and `(tmp_path / "plugin.toml").write_text(...)` with no `encoding` argument.
 **Actually used:** Both calls take `encoding="utf-8"`.
 **Why:** The plan's `BAD_TOOL_TOPLEVEL_IMPORT` fixture contains an em-dash (`—`). On Windows, `Path.write_text` defaults to the OEM/locale codepage (cp1252), which encodes that character as byte 0x97. The plugin loader (per the plan) reads files with `read_text(encoding="utf-8")`, which then raises `UnicodeDecodeError`. Forcing UTF-8 on the writes makes the test deterministic across OSes without changing the loader's contract (UTF-8 source files are the right assumption for Python plugins).
+
+## Task 12.1 — `_consume_one` MatchError message includes the word "extra"
+**Plan said:** When in `allow_extra=False` mode the matcher raises `MatchError(f"expected {tool} at position {start}, got {name} (args={args})")`.
+**Actually used:** Same message but with "got extra unexpected call" in place of "got" so the test's `pytest.raises(MatchError, match="extra")` regex matches.
+**Why:** The plan's `test_allow_extra_false_rejects_extras` expects the error to match the regex `"extra"`, but the plan's literal implementation never emits that word in the strict-mode rejection path. Adjusting the message text (one phrase) is the smallest change that reconciles the plan's own test with the implementation. Semantics are unchanged.
