@@ -1,0 +1,35 @@
+{
+  "name": "euler_cleanup_ambiguous_arms",
+  "description": "Ambiguous request with multiple arm namespaces; agent should clarify.",
+  "intent": "fix euler on the arms",
+  "clarify_responses": ["just the L_arm_FK_CTL"],
+  "fixture_observations": [
+    {
+      "match_tool": "inspect_scene",
+      "response": {"ok": true, "value": {
+        "selection": [],
+        "namespaces": ["rig", "secondary_rig"],
+        "all_nodes": ["rig:L_arm_FK_CTL", "rig:R_arm_FK_CTL", "secondary_rig:L_arm_IK_CTL"]
+      }}
+    },
+    {
+      "match_tool": "find_euler_discontinuities",
+      "match_args_contain": {"objects": ["rig:L_arm_FK_CTL"]},
+      "response": {"ok": true, "value": {
+        "discontinuities": [{"object": "rig:L_arm_FK_CTL", "attribute": "rotateZ", "frame": 12, "jump_degrees": 270}]
+      }}
+    },
+    {
+      "match_tool": "fix_euler_discontinuities",
+      "match_args_contain": {"objects": ["rig:L_arm_FK_CTL"]},
+      "response": {"ok": true, "value": {"count": 1}}
+    }
+  ],
+  "expected_calls": [
+    "inspect_scene",
+    {"tool": "fix_euler_discontinuities", "args_contain": {"objects": ["rig:L_arm_FK_CTL"]}}
+  ],
+  "allow_extra_calls": true,
+  "terminal_action": "finish",
+  "max_steps": 12
+}

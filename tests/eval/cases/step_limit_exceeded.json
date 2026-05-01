@@ -1,0 +1,16 @@
+{
+  "name": "step_limit_exceeded",
+  "description": "Force the agent to loop on inspect_scene to verify circuit breaker fires.",
+  "intent": "tell me everything about the scene in extreme detail",
+  "clarify_responses": [],
+  "fixture_observations": [
+    {
+      "match_tool": "inspect_scene",
+      "response": {"ok": true, "value": {"hint": "ambiguous"}}
+    }
+  ],
+  "expected_calls": [],
+  "allow_extra_calls": true,
+  "terminal_action": "step_limit",
+  "max_steps": 4
+}

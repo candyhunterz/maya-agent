@@ -1,0 +1,25 @@
+{
+  "name": "playblast_with_assumptions",
+  "description": "User asks for a playblast without specifying parameters; agent fills in defaults.",
+  "intent": "playblast the current shot",
+  "clarify_responses": [],
+  "fixture_observations": [
+    {
+      "match_tool": "inspect_scene",
+      "response": {"ok": true, "value": {
+        "scene_path": "/fixtures/shot_010.ma", "frame_range": [1, 120], "framerate": "film"
+      }}
+    },
+    {
+      "match_tool": "playblast",
+      "response": {"ok": true, "value": {"path": "/tmp/shot_010_playblast.mov", "frames": [1, 120]}}
+    }
+  ],
+  "expected_calls": [
+    "inspect_scene",
+    {"tool": "playblast"}
+  ],
+  "allow_extra_calls": true,
+  "terminal_action": "finish",
+  "max_steps": 8
+}

@@ -1,0 +1,23 @@
+{
+  "name": "tool_error_recovery",
+  "description": "First fix attempt errors; agent re-reads error and retries with corrected args.",
+  "intent": "fix euler on rig:L_arm_FK_CTL",
+  "clarify_responses": [],
+  "fixture_observations": [
+    {
+      "match_tool": "fix_euler_discontinuities",
+      "match_args_contain": {"objects": ["rig:L_arm_FK_CTL"]},
+      "response": {"ok": false, "error": "Object 'rig:L_arm_FK_CTL' has locked rotateX channel; unlock first or use a different channel."}
+    },
+    {
+      "match_tool": "inspect_scene",
+      "response": {"ok": true, "value": {"selection": ["rig:L_arm_FK_CTL"], "namespaces": ["rig"]}}
+    }
+  ],
+  "expected_calls": [
+    {"any_order": ["fix_euler_discontinuities", "inspect_scene"]}
+  ],
+  "allow_extra_calls": true,
+  "terminal_action": "finish",
+  "max_steps": 10
+}

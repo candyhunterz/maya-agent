@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+build/
+dist/
+*.log
+~/.maya-agent/
+tests/eval/recordings/*.actual.jsonl
+.coverage
+.vscode/
+.idea/
+
+# Local environment artifacts (deviation from plan — see docs/glass-deviations.md)
+.glass/
+.mcp.json
