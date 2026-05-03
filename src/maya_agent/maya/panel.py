@@ -1,6 +1,8 @@
 """Maya Agent Qt panel. Dockable widget with chat, input, status, controls.
 
-Imports PySide6; tested manually inside Maya. The panel owns:
+Imports through qtpy so the panel works under whatever Qt binding mayapy
+ships (PySide2 on Maya 2024, PySide6 on Maya 2025+). Tested manually inside
+Maya. The panel owns:
 - A CommandServer instance
 - A subprocess.Popen reference for the sidecar (if launched in-panel)
 - A chat model (list of items: user message, assistant message, tool entry)
@@ -17,7 +19,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from PySide6 import QtCore, QtGui, QtWidgets
+from qtpy import QtCore, QtGui, QtWidgets
 
 from maya_agent.core.protocol import (
     AssistantMessage, CancelMessage, ClarifyQuestionMessage, ClarifyResponseMessage,
@@ -200,7 +202,7 @@ class MayaAgentPanel(QtWidgets.QWidget):
     def _on_clear_clicked(self) -> None:
         if QtWidgets.QMessageBox.question(
             self, "Clear chat", "Clear conversation history and cross-intent memory?"
-        ) == QtWidgets.QMessageBox.StandardButton.Yes:
+        ) == QtWidgets.QMessageBox.Yes:
             self._chat.clear()
             self._tool_entries.clear()
 

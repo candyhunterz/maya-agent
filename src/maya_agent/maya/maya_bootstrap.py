@@ -1,7 +1,7 @@
 """Maya bootstrap: registers the panel as a workspaceControl, loads plugins.
 
 Called from userSetup.py (or a shelf button) inside Maya. Not importable
-outside Maya (uses maya.cmds and PySide6 widget integration).
+outside Maya (uses maya.cmds and Qt widget integration via qtpy).
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 
 from maya import cmds
-from PySide6 import QtWidgets
+from qtpy import QtWidgets
 
 from maya_agent.core.plugin_loader import load_plugins_from_paths
 from maya_agent.core.registry import ToolRegistry
@@ -38,7 +38,7 @@ def _build_registry() -> tuple[ToolRegistry, list[str]]:
 
 def show_panel() -> None:
     """Create or focus the Maya Agent dockable panel."""
-    from maya_agent.maya.panel import MayaAgentPanel  # late import (PySide6 needs Maya UI)
+    from maya_agent.maya.panel import MayaAgentPanel  # late import (Qt needs Maya UI)
 
     if cmds.workspaceControl(_PANEL_OBJECT_NAME, exists=True):
         cmds.workspaceControl(_PANEL_OBJECT_NAME, edit=True, restore=True)
@@ -62,7 +62,10 @@ def show_panel() -> None:
 
 def _qt_widget_for_workspace_control(name: str) -> QtWidgets.QWidget:
     """Find the QWidget for a workspaceControl by name."""
-    from shiboken6 import wrapInstance
+    try:
+        from shiboken6 import wrapInstance
+    except ImportError:
+        from shiboken2 import wrapInstance
     from maya.OpenMayaUI import MQtUtil
     ptr = MQtUtil.findControl(name)
     if ptr is None:

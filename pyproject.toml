@@ -9,7 +9,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-maya = ["PySide6>=6.5.0"]
+# qtpy abstracts over PySide2 (Maya 2024) and PySide6 (Maya 2025+).
+# Maya supplies the Qt binding itself; this extra only adds the qtpy shim.
+maya = ["qtpy>=2.4.0"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",

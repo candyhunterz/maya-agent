@@ -12,7 +12,7 @@ import logging
 import os
 from typing import Callable
 
-from PySide6 import QtCore, QtNetwork
+from qtpy import QtCore, QtNetwork
 
 from maya_agent.core.frames import FrameDecoder, FrameError, encode_frame
 from maya_agent.core.protocol import AuthMessage, Message, encode_message, parse_message
