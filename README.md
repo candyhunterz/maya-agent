@@ -119,6 +119,7 @@ Plugins are plain Python files. See `docs/writing-a-tool.md` for the full guide.
 - [`docs/architecture.md`](docs/architecture.md) — system overview, process boundaries, auth handshake
 - [`docs/protocol.md`](docs/protocol.md) — wire protocol, frame format, message types
 - [`docs/writing-a-tool.md`](docs/writing-a-tool.md) — plugin author guide
+- [`docs/studio-deployment.md`](docs/studio-deployment.md) — air-gapped studio install (wheels staging, mayapy install, SPK Ollama)
 - [`docs/glass-summary.md`](docs/glass-summary.md) — v1 implementation report
 - [`docs/smoke-test-instructions.md`](docs/smoke-test-instructions.md) — manual smoke procedure
 - `docs/superpowers/specs/2026-05-01-maya-agent-v1-design.md` — full design document
